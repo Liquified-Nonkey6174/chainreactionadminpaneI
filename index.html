@@ -6,7 +6,6 @@
 <title>Chain Reaction — Admin</title>
 <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-app.js"></script>
 <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-database.js"></script>
-<script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-auth.js"></script>
 <style>
   :root {
     --bg: #14100d;
@@ -155,6 +154,25 @@
   .announce-preview .ann-sm { font-size: 0.85em; }
   .announce-preview .ann-lg { font-size: 1.35em; }
 
+  /* CHAT MODERATION */
+  .chat-mod-toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 0.6rem; flex-wrap: wrap; }
+  .chat-mod-toolbar select, .chat-mod-toolbar input[type=text] {
+    background: var(--panel); border: 1px solid var(--line); color: var(--text); border-radius: 8px;
+    padding: 6px 10px; font-size: 12px; font-family: inherit;
+  }
+  .chat-mod-list { border: 1px solid var(--line); border-radius: 12px; overflow: hidden; max-height: 440px; overflow-y: auto; }
+  .chat-mod-row { padding: 10px 14px; border-bottom: 1px solid var(--line); background: var(--panel); }
+  .chat-mod-row:nth-child(even) { background: var(--panel-2); }
+  .chat-mod-row:last-child { border-bottom: none; }
+  .chat-mod-meta { display: flex; justify-content: space-between; gap: 8px; font-family: var(--mono); font-size: 10px; color: var(--text-dim); margin-bottom: 4px; }
+  .chat-mod-text { font-size: 13px; white-space: pre-wrap; word-wrap: break-word; margin-bottom: 6px; }
+  .chat-mod-actions { display: flex; gap: 6px; }
+  .chat-mod-actions button { padding: 5px 10px; font-size: 11px; }
+  .chat-mod-edit-input {
+    width: 100%; min-height: 54px; background: var(--bg); border: 1px solid var(--accent); border-radius: 6px;
+    color: var(--text); font-family: inherit; font-size: 13px; padding: 6px 8px; margin-bottom: 6px; resize: vertical;
+  }
+
   .status {
     position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
     background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px;
@@ -232,27 +250,21 @@
       </div>
     </div>
 
-    <!-- ROOMS SECTION -->
-    <div style="margin-top:24px;background:#fff;border-radius:12px;padding:20px;box-shadow:0 2px 8px rgba(0,0,0,0.06);">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
-        <h3 style="margin:0;">Open Rooms</h3>
-        <button class="btn-quiet" onclick="loadRooms()">Refresh</button>
+    <div class="section-gap">
+      <div class="section-title">Chat moderation</div>
+      <div class="sub">Edit or delete messages in global chat or any room, by code.</div>
+      <div class="chat-mod-toolbar">
+        <select id="chat-mod-scope" onchange="switchChatModScope()">
+          <option value="global">Global chat</option>
+          <option value="room">Room…</option>
+        </select>
+        <input type="text" id="chat-mod-room-code" placeholder="Room code" style="display:none;" oninput="debounceChatModRoomSwitch()">
+        <button class="btn-quiet" onclick="loadChatModMessages()">Refresh</button>
+        <span class="count" id="chat-mod-count"></span>
       </div>
-      <div id="rooms-list" style="font-size:13px;color:#999;">Loading…</div>
-    </div>
-
-    <!-- DUPLICATE ACCOUNTS SECTION -->
-    <div style="margin-top:24px;background:#fff;border-radius:12px;padding:20px;box-shadow:0 2px 8px rgba(0,0,0,0.06);">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
-        <h3 style="margin:0;">Possible Duplicate Accounts</h3>
-        <button class="btn-quiet" onclick="loadDuplicates()">Refresh</button>
+      <div class="chat-mod-list" id="chat-mod-list">
+        <div class="loading">Loading messages…</div>
       </div>
-      <div style="font-size:12px;color:#999;margin-bottom:12px;">
-        Accounts that share the same browser fingerprint. This is a hint, not proof — a family
-        sharing one computer will also show up here. Nothing here merges or bans automatically;
-        review and ban by hand if it looks like real abuse.
-      </div>
-      <div id="duplicates-list" style="font-size:13px;color:#999;">Loading…</div>
     </div>
   </div>
 
@@ -272,26 +284,19 @@
     appId: "1:1013659619628:web:3100ed4eda5164e5159c89"
   });
   var db = firebase.database();
-  firebase.auth().signInAnonymously().catch(function(e) { console.warn('Auth failed:', e); });
 
-  // ======== SHA-256 PASSWORD GATE ========
-  var ADMIN_HASH = "2a286b0ee691950be3b8aa8e6f45ba86d489e8053c5a253e403f13451c4024df";
+  // ======== SIMPLE CLIENT-SIDE GATE ========
+  // Change this to whatever you like. Again: this is a UI convenience, not security.
+  var ADMIN_PASSWORD = "ADMlN";
 
-  async function sha256(text) {
-    var buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
-    return Array.from(new Uint8Array(buf)).map(function(b) { return b.toString(16).padStart(2, '0'); }).join('');
-  }
-
-  async function tryUnlock() {
+  function tryUnlock() {
     var pw = document.getElementById('gate-pw').value;
-    var hash = await sha256(pw);
-    if (hash === ADMIN_HASH) {
+    if (pw === ADMIN_PASSWORD) {
       document.getElementById('gate').style.display = 'none';
       document.getElementById('panel').style.display = 'block';
       loadUsers();
       loadAnnouncement();
-      loadRooms();
-      loadDuplicates();
+      loadChatModMessages();
     } else {
       showStatus('Wrong password.', true);
     }
@@ -389,6 +394,126 @@
       }
     }).catch(function(err) {
       showStatus('Failed to post announcement: ' + err.message, true);
+    });
+  }
+
+  // ======== CHAT MODERATION ========
+  // Live-updates via .on('value') so new messages appear without a manual
+  // refresh. Only one listener is kept attached at a time — switching scope
+  // (global vs a room) or reloading always detaches the previous one first,
+  // same pattern the game itself uses for its own chat listeners.
+  var chatModRef = null;
+  var chatModHandler = null;
+  var chatModEditingKey = null;
+  var chatModLastMessages = [];
+  var chatModRoomDebounce = null;
+
+  function switchChatModScope() {
+    var scope = document.getElementById('chat-mod-scope').value;
+    document.getElementById('chat-mod-room-code').style.display = scope === 'room' ? '' : 'none';
+    if (scope === 'global') {
+      loadChatModMessages();
+    } else {
+      if (chatModRef && chatModHandler) { chatModRef.off('value', chatModHandler); chatModRef = null; chatModHandler = null; }
+      document.getElementById('chat-mod-list').innerHTML = '<div class="empty">Enter a room code and hit Refresh.</div>';
+      document.getElementById('chat-mod-count').textContent = '';
+    }
+  }
+
+  function debounceChatModRoomSwitch() {
+    clearTimeout(chatModRoomDebounce);
+    chatModRoomDebounce = setTimeout(loadChatModMessages, 500);
+  }
+
+  function loadChatModMessages() {
+    var scope = document.getElementById('chat-mod-scope').value;
+    var path;
+    if (scope === 'global') {
+      path = 'chat/global';
+    } else {
+      var code = document.getElementById('chat-mod-room-code').value.trim();
+      if (!code) { document.getElementById('chat-mod-list').innerHTML = '<div class="empty">Enter a room code.</div>'; return; }
+      path = 'chat/rooms/' + code;
+    }
+
+    if (chatModRef && chatModHandler) chatModRef.off('value', chatModHandler);
+    chatModEditingKey = null;
+    document.getElementById('chat-mod-list').innerHTML = '<div class="loading">Loading messages…</div>';
+
+    chatModRef = db.ref(path);
+    chatModHandler = chatModRef.orderByChild('timestamp').on('value', function(snap) {
+      var messages = [];
+      snap.forEach(function(child) { messages.push({ key: child.key, val: child.val() || {} }); });
+      messages.reverse(); // newest first
+      chatModLastMessages = messages;
+      renderChatModList(messages);
+    }, function(err) {
+      document.getElementById('chat-mod-list').innerHTML = '<div class="empty">Could not load messages: ' + escHtml(err.message) + '</div>';
+    });
+  }
+
+  function renderChatModList(messages) {
+    document.getElementById('chat-mod-count').textContent = messages.length + (messages.length === 1 ? ' message' : ' messages');
+    var list = document.getElementById('chat-mod-list');
+    if (messages.length === 0) { list.innerHTML = '<div class="empty">No messages here.</div>'; return; }
+
+    var html = '';
+    messages.forEach(function(m) {
+      var v = m.val;
+      var isEditing = chatModEditingKey === m.key;
+      html += '<div class="chat-mod-row">';
+      html += '<div class="chat-mod-meta"><span>' + escHtml(v.username || '(unknown)') + '</span><span>' + fmtSeen(v.timestamp || 0) + '</span></div>';
+      if (isEditing) {
+        html += '<textarea class="chat-mod-edit-input" id="chat-mod-edit-input">' + escHtml(v.text || '') + '</textarea>';
+        html += '<div class="chat-mod-actions">';
+        html += '<button class="btn-primary" onclick="saveChatEdit(\'' + escJs(m.key) + '\')">Save</button>';
+        html += '<button class="btn-quiet" onclick="cancelChatEdit()">Cancel</button>';
+        html += '</div>';
+      } else {
+        html += '<div class="chat-mod-text">' + escHtml(v.text || '') + '</div>';
+        html += '<div class="chat-mod-actions">';
+        html += '<button class="btn-quiet" onclick="startChatEdit(\'' + escJs(m.key) + '\')">Edit</button>';
+        html += '<button class="btn-danger" onclick="deleteChatMessage(\'' + escJs(m.key) + '\')">Delete</button>';
+        html += '</div>';
+      }
+      html += '</div>';
+    });
+    list.innerHTML = html;
+
+    if (chatModEditingKey) {
+      var inp = document.getElementById('chat-mod-edit-input');
+      if (inp) { inp.focus(); inp.setSelectionRange(inp.value.length, inp.value.length); }
+    }
+  }
+
+  function startChatEdit(key) {
+    chatModEditingKey = key;
+    renderChatModList(chatModLastMessages);
+  }
+
+  function cancelChatEdit() {
+    chatModEditingKey = null;
+    renderChatModList(chatModLastMessages);
+  }
+
+  function saveChatEdit(key) {
+    var inp = document.getElementById('chat-mod-edit-input');
+    if (!inp || !chatModRef) return;
+    chatModRef.child(key + '/text').set(inp.value).then(function() {
+      chatModEditingKey = null;
+      showStatus('Message updated.');
+    }).catch(function(err) {
+      showStatus('Edit failed: ' + err.message, true);
+    });
+  }
+
+  function deleteChatMessage(key) {
+    if (!chatModRef) return;
+    if (!confirm('Delete this message? This can\'t be undone.')) return;
+    chatModRef.child(key).remove().then(function() {
+      showStatus('Message deleted.');
+    }).catch(function(err) {
+      showStatus('Delete failed: ' + err.message, true);
     });
   }
 
@@ -521,7 +646,7 @@
       if (u.stale) {
         html += '<div class="uname">' + escHtml(u.nameKey) + ' <span style="color:var(--danger);font-family:var(--mono);font-size:10px;">stale claim → now "' + escHtml(u.username) + '"</span></div>';
       } else if (isEditing) {
-        html += '<div class="uname"><input type="text" id="edit-input" maxlength="16" value="' + escAttr(u.username === '(none)' ? '' : u.username) + '"></div>';
+        html += '<div class="uname"><input type="text" id="edit-input" maxlength="16" value="' + escAttr(u.username) + '"></div>';
       } else {
         html += '<div class="uname" onclick="toggleHistory(\'' + escJs(u.id) + '\')">' + (expandedIds[u.id] ? '▾ ' : '▸ ') + escHtml(u.username) + '</div>';
       }
@@ -606,7 +731,7 @@
 
     var user = allUsers.find(function(u) { return u.id === id; });
     if (!user) return;
-    var oldName = user.username === '(none)' ? '' : user.username;
+    var oldName = user.username;
 
     if (newName === oldName) { cancelEdit(); return; }
 
@@ -723,15 +848,19 @@
     if (!confirm('Reset this user\'s username?\n\n"' + username + '" (' + id + ')\n\nFrees the name up for anyone to claim. They\'ll see this happen immediately and be prompted to pick a new one.')) return;
     var updates = {};
     updates['users/' + id + '/username'] = null;
-    if (username && username !== '(none)') {
+    if (username) {
       updates['usernames/' + username.toLowerCase()] = null;
       var histKey = db.ref('users/' + id + '/history').push().key;
       updates['users/' + id + '/history/' + histKey] = { name: username, changedAt: firebase.database.ServerValue.TIMESTAMP };
     }
     db.ref().update(updates).then(function() {
-      var u = allUsers.find(function(u) { return u.id === id; });
-      if (u) u.username = '(none)';
-      delete historyCache[id]; // force a re-fetch next time it's expanded, so the new entry shows
+      // Once a user has no username, there's nothing left to show or manage
+      // for them here — drop the row entirely rather than leaving a nameless
+      // placeholder still exposing their device code/fingerprint. They'll
+      // reappear in the list on their own once they pick a new name.
+      allUsers = allUsers.filter(function(u) { return u.id !== id; });
+      delete historyCache[id];
+      delete expandedIds[id];
       renderList();
       showStatus('Reset "' + username + '".');
     }).catch(function(err) {
@@ -757,92 +886,6 @@
           if (Object.keys(updates).length) db.ref('chat/rooms/' + roomCode).update(updates);
         });
       });
-    });
-  }
-
-  // ======== ROOMS MANAGEMENT ========
-  function loadRooms() {
-    var list = document.getElementById('rooms-list');
-    list.innerHTML = 'Loading…';
-    db.ref('rooms').once('value', function(snap) {
-      if (!snap.exists() || !snap.val()) {
-        list.innerHTML = '<em>No open rooms</em>';
-        return;
-      }
-      var rooms = snap.val();
-      var html = '<table style="width:100%;border-collapse:collapse;font-size:13px;">';
-      html += '<tr style="text-align:left;border-bottom:2px solid #eee;"><th style="padding:6px;">Code</th><th style="padding:6px;">Host</th><th style="padding:6px;">Size</th><th style="padding:6px;">Players</th><th style="padding:6px;">Status</th><th style="padding:6px;"></th></tr>';
-      for (var code in rooms) {
-        var r = rooms[code];
-        html += '<tr style="border-bottom:1px solid #f0f0f0;">';
-        html += '<td style="padding:6px;font-weight:700;font-family:monospace;">' + escHtml(code) + '</td>';
-        html += '<td style="padding:6px;">' + escHtml(r.hostName || '?') + '</td>';
-        html += '<td style="padding:6px;">' + (r.size || '?') + '×' + (r.size || '?') + '</td>';
-        html += '<td style="padding:6px;">' + (r.playerCount || 0) + ' (' + (r.humans || 0) + 'H+' + (r.ais || 0) + 'AI)</td>';
-        html += '<td style="padding:6px;">' + (r.inProgress ? '<span style="color:#e87ea8;">In Progress</span>' : '<span style="color:#6ecf6e;">Waiting</span>') + '</td>';
-        html += '<td style="padding:6px;"><button class="btn-quiet" style="color:#e55;" onclick="closeRoom(\'' + escJs(code) + '\')">Close</button></td>';
-        html += '</tr>';
-      }
-      html += '</table>';
-      list.innerHTML = html;
-    }, function(err) {
-      list.innerHTML = '<em style="color:#e55;">Could not load rooms: ' + escHtml(err.message) + ' (check that your database rules have a "rooms" node with .read: true)</em>';
-    });
-  }
-
-  function closeRoom(code) {
-    if (!confirm('Close room ' + code + '? This removes it from the public list.')) return;
-    db.ref('rooms/' + code).remove().then(function() {
-      showStatus('Room ' + code + ' closed.');
-      loadRooms();
-    }).catch(function(e) {
-      showStatus('Failed to close room: ' + e.message, true);
-    });
-  }
-
-  // ======== POSSIBLE DUPLICATE ACCOUNTS ========
-  // Groups accounts by the browser fingerprint stored on their user record.
-  // This is a hint only — never acts automatically. A fingerprint match just
-  // means "same browser + screen + timezone", which also happens for two
-  // different people sharing a computer, so review before banning anything.
-  function loadDuplicates() {
-    var list = document.getElementById('duplicates-list');
-    list.innerHTML = 'Loading…';
-    db.ref('users').once('value', function(snap) {
-      if (!snap.exists()) { list.innerHTML = '<em>No accounts yet</em>'; return; }
-      var byFingerprint = {};
-      snap.forEach(function(child) {
-        var u = child.val();
-        var fp = u.fingerprint;
-        if (!fp) return;
-        if (!byFingerprint[fp]) byFingerprint[fp] = [];
-        byFingerprint[fp].push({ userId: child.key, username: u.username || '(no name)', secret: u.secret || '' });
-      });
-      var groups = [];
-      for (var fp in byFingerprint) {
-        if (byFingerprint[fp].length > 1) groups.push({ fp: fp, accounts: byFingerprint[fp] });
-      }
-      if (groups.length === 0) { list.innerHTML = '<em>No matches found</em>'; return; }
-      groups.sort(function(a, b) { return b.accounts.length - a.accounts.length; });
-      var html = '';
-      for (var g = 0; g < groups.length; g++) {
-        var grp = groups[g];
-        html += '<div style="border:1px solid #eee;border-radius:8px;padding:10px;margin-bottom:10px;">';
-        html += '<div style="font-size:11px;color:#bbb;font-family:monospace;margin-bottom:6px;">' + escHtml(grp.fp) + ' — ' + grp.accounts.length + ' accounts</div>';
-        for (var a = 0; a < grp.accounts.length; a++) {
-          var acc = grp.accounts[a];
-          html += '<div style="display:flex;justify-content:space-between;align-items:center;padding:4px 0;font-size:13px;">';
-          html += '<span>' + escHtml(acc.username) + ' <span style="color:#bbb;font-size:11px;font-family:monospace;">' + escHtml(acc.userId) + '</span></span>';
-          if (acc.secret) {
-            html += '<button class="btn-quiet" style="color:#e55;" onclick="blockCode(\'' + escJs(acc.secret) + '\', \'' + escJs(acc.username) + '\')">Ban device</button>';
-          }
-          html += '</div>';
-        }
-        html += '</div>';
-      }
-      list.innerHTML = html;
-    }, function(err) {
-      list.innerHTML = '<em style="color:#e55;">Failed to load: ' + escHtml(err.message) + '</em>';
     });
   }
 
