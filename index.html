@@ -267,6 +267,19 @@
         <div class="loading">Loading messages…</div>
       </div>
     </div>
+
+    <div class="section-gap">
+      <div class="section-title">Open rooms</div>
+      <div class="sub">Rooms currently listed in the public lobby. Deleting one just delists it — it doesn't kick players already inside, but it stops it from being joined via the room browser and frees the code.</div>
+      <div class="toolbar">
+        <button class="btn-quiet" onclick="loadRooms()">Refresh</button>
+        <button class="btn-quiet" id="rooms-cleanup-btn" onclick="cleanupStaleRooms()" style="display:none;">Clean up stale rooms</button>
+        <span class="count" id="rooms-count"></span>
+      </div>
+      <div class="list" id="rooms-list">
+        <div class="loading">Loading rooms…</div>
+      </div>
+    </div>
   </div>
 
 </div>
@@ -294,9 +307,24 @@
   // already does exactly this same anonymous sign-in for the same reason;
   // it doesn't grant any special admin privilege, it just satisfies
   // "auth != null" so writes go through at all.
-  var authReady = firebase.auth().signInAnonymously().catch(function(err) {
-    showStatus('Could not authenticate: ' + err.message, true);
+  var authReady = firebase.auth().signInAnonymously().then(function(cred) {
+    setAuthBadge('Signed in anonymously (uid: ' + cred.user.uid + ')', false);
+  }).catch(function(err) {
+    setAuthBadge('NOT authenticated — ' + err.code + ': ' + err.message, true);
   });
+
+  function setAuthBadge(text, isBad) {
+    var el = document.getElementById('auth-badge');
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'auth-badge';
+      el.style.cssText = 'font-family:var(--mono);font-size:11px;padding:6px 10px;border-radius:8px;margin-bottom:1rem;border:1px solid var(--line);';
+      document.getElementById('panel').insertBefore(el, document.getElementById('panel').firstChild.nextSibling);
+    }
+    el.textContent = text;
+    el.style.color = isBad ? 'var(--danger)' : 'var(--good)';
+    el.style.borderColor = isBad ? 'var(--danger)' : 'var(--good)';
+  }
 
   // ======== SIMPLE CLIENT-SIDE GATE ========
   // Change this to whatever you like. Again: this is a UI convenience, not security.
@@ -316,6 +344,7 @@
       loadUsers();
       loadAnnouncement();
       loadChatModMessages();
+      loadRooms();
     });
   }
   document.getElementById('gate-pw').onkeydown = function(e) {
@@ -531,6 +560,103 @@
       showStatus('Message deleted.');
     }).catch(function(err) {
       showStatus('Delete failed: ' + err.message, true);
+    });
+  }
+
+  // ======== OPEN ROOMS ========
+  // /rooms/{code} is the public lobby listing the game writes to when someone
+  // hosts (hostName, size, humans, ais, playerCount, inProgress, ts). This is
+  // separate from chat/rooms/{code}, which holds that room's chat history and
+  // isn't touched here. Removing a room entry just delists and frees the
+  // code — it's the same effect as the host leaving (see olLeave() in the
+  // game, which does the equivalent db.ref('rooms/'+code).remove()). Players
+  // already connected inside the room aren't disconnected by this; it only
+  // stops new players from finding/joining it through the lobby browser.
+  var roomsRef = null;
+  var roomsHandler = null;
+  var allRooms = []; // { code, hostName, size, humans, ais, playerCount, inProgress, ts }
+
+  function loadRooms() {
+    document.getElementById('rooms-list').innerHTML = '<div class="loading">Loading rooms…</div>';
+    if (roomsRef && roomsHandler) roomsRef.off('value', roomsHandler);
+    roomsRef = db.ref('rooms');
+    roomsHandler = roomsRef.on('value', function(snap) {
+      var rooms = [];
+      snap.forEach(function(child) {
+        var v = child.val() || {};
+        rooms.push({
+          code: child.key,
+          hostName: v.hostName || '(unknown)',
+          size: v.size || 0,
+          humans: v.humans || 0,
+          ais: v.ais || 0,
+          playerCount: v.playerCount || 0,
+          inProgress: !!v.inProgress,
+          ts: v.ts || 0
+        });
+      });
+      rooms.sort(function(a, b) { return b.ts - a.ts; });
+      allRooms = rooms;
+      renderRooms();
+    }, function(err) {
+      document.getElementById('rooms-list').innerHTML = '<div class="empty">Could not load rooms: ' + escHtml(err.message) + '</div>';
+    });
+  }
+
+  function renderRooms() {
+    document.getElementById('rooms-count').textContent = allRooms.length + (allRooms.length === 1 ? ' room' : ' rooms');
+    var list = document.getElementById('rooms-list');
+    if (allRooms.length === 0) {
+      list.innerHTML = '<div class="empty">No open rooms right now.</div>';
+      document.getElementById('rooms-cleanup-btn').style.display = 'none';
+      return;
+    }
+
+    // A room is "stale" if it's sat open for over 6 hours — almost certainly
+    // an abandoned session that never got cleaned up on disconnect, rather
+    // than a real ongoing game.
+    var STALE_MS = 6 * 60 * 60 * 1000;
+    var staleCount = 0;
+
+    var html = '<div class="row head"><div>Code</div><div>Host</div><div>Players</div><div>Age</div><div>Actions</div></div>';
+    allRooms.forEach(function(r) {
+      var isStale = r.ts && (Date.now() - r.ts) > STALE_MS;
+      if (isStale) staleCount++;
+      html += '<div class="row' + (isStale ? ' blocked' : '') + '">';
+      html += '<div class="uname">' + escHtml(r.code) + '</div>';
+      html += '<div class="uid">' + escHtml(r.hostName) + '</div>';
+      html += '<div class="code">' + r.playerCount + '/' + r.size + (r.inProgress ? ' &bull; in progress' : ' &bull; waiting') + '</div>';
+      html += '<div class="seen">' + fmtSeen(r.ts) + (isStale ? ' <span style="color:var(--danger);">stale</span>' : '') + '</div>';
+      html += '<div class="actions"><button class="btn-danger" onclick="deleteRoom(\'' + escJs(r.code) + '\')">Delete</button></div>';
+      html += '</div>';
+    });
+    list.innerHTML = html;
+
+    var cleanupBtn = document.getElementById('rooms-cleanup-btn');
+    cleanupBtn.style.display = staleCount > 0 ? '' : 'none';
+    if (staleCount > 0) cleanupBtn.textContent = 'Clean up ' + staleCount + ' stale room' + (staleCount > 1 ? 's' : '');
+  }
+
+  function deleteRoom(code) {
+    if (!confirm('Delete room "' + code + '"?\n\nThis delists it from the public lobby and frees the code. Players already in the room are not removed.')) return;
+    db.ref('rooms/' + code).remove().then(function() {
+      showStatus('Deleted room ' + code + '.');
+    }).catch(function(err) {
+      showStatus('Delete failed: ' + err.message, true);
+    });
+  }
+
+  function cleanupStaleRooms() {
+    var STALE_MS = 6 * 60 * 60 * 1000;
+    var stale = allRooms.filter(function(r) { return r.ts && (Date.now() - r.ts) > STALE_MS; });
+    if (stale.length === 0) return;
+    if (!confirm('Delete ' + stale.length + ' stale room' + (stale.length > 1 ? 's' : '') + ' (open more than 6 hours)?')) return;
+    var updates = {};
+    stale.forEach(function(r) { updates['rooms/' + r.code] = null; });
+    db.ref().update(updates).then(function() {
+      showStatus('Cleaned up ' + stale.length + ' stale room' + (stale.length > 1 ? 's' : '') + '.');
+    }).catch(function(err) {
+      showStatus('Cleanup failed: ' + err.message, true);
     });
   }
 
