@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Chain Reaction — Admin</title>
 <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-app.js"></script>
+<script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-auth.js"></script>
 <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-database.js"></script>
 <style>
   :root {
@@ -285,21 +286,37 @@
   });
   var db = firebase.database();
 
+  // ======== ANONYMOUS AUTH ========
+  // The database rules require "auth != null" on every write path (users,
+  // usernames, chat, banned, etc). This page never had any Firebase Auth
+  // session of its own — it only checked a local password — so every write
+  // it made was being rejected as unauthenticated. The main game client
+  // already does exactly this same anonymous sign-in for the same reason;
+  // it doesn't grant any special admin privilege, it just satisfies
+  // "auth != null" so writes go through at all.
+  var authReady = firebase.auth().signInAnonymously().catch(function(err) {
+    showStatus('Could not authenticate: ' + err.message, true);
+  });
+
   // ======== SIMPLE CLIENT-SIDE GATE ========
   // Change this to whatever you like. Again: this is a UI convenience, not security.
   var ADMIN_PASSWORD = "ADMlN";
 
   function tryUnlock() {
     var pw = document.getElementById('gate-pw').value;
-    if (pw === ADMIN_PASSWORD) {
+    if (pw !== ADMIN_PASSWORD) {
+      showStatus('Wrong password.', true);
+      return;
+    }
+    // Wait for the anonymous auth session so the first actions after unlock
+    // don't race ahead of it and hit PERMISSION_DENIED.
+    Promise.resolve(authReady).then(function() {
       document.getElementById('gate').style.display = 'none';
       document.getElementById('panel').style.display = 'block';
       loadUsers();
       loadAnnouncement();
       loadChatModMessages();
-    } else {
-      showStatus('Wrong password.', true);
-    }
+    });
   }
   document.getElementById('gate-pw').onkeydown = function(e) {
     if (e.key === 'Enter') tryUnlock();
